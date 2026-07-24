@@ -1,14 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Mic, MicOff, Search, Plus, RefreshCw, Volume2, Sparkles, 
-  Tag, Filter, CheckCircle2, Edit3, Trash2, X, AlertCircle, Key, Cpu, Clock, Undo2, Database
+  Tag, Filter, CheckCircle2, Edit3, Trash2, X, AlertCircle, Key, Cpu, Clock, Undo2, Database, LogOut
 } from 'lucide-react';
 import { INITIAL_ITEMS, CATEGORY_MAP } from './data';
 import { parseVoiceSearch, removeAccents, getStandardVietnameseName } from './voiceParser';
 import { extractItemsWithLLM } from './llmService';
 import { getSupabaseClient, getSupabaseConfig, resetSupabaseClient } from './supabase';
+import LoginScreen from './LoginScreen';
+import { 
+  fetchAppConfig, parseLlmConfig, saveLlmConfig, setAdminPin, verifyPin, 
+  isPinConfigured, saveSession, isSessionValid, clearSession 
+} from './configService';
 
 export default function App() {
+  const [authState, setAuthState] = useState('loading'); // 'loading' | 'unauthenticated' | 'authenticated' | 'setup'
+  const [appConfig, setAppConfig] = useState(null);
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [newPinInput, setNewPinInput] = useState('');
+
   const [items, setItems] = useState(() => {
     const saved = localStorage.getItem('voice_price_items');
     if (saved) {
@@ -57,6 +68,88 @@ export default function App() {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
 
+  // Khởi tạo xác thực và cấu hình từ Supabase
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        const config = await fetchAppConfig();
+        setAppConfig(config);
+
+        if (!config || !isPinConfigured(config)) {
+          setAuthState('setup');
+        } else if (isSessionValid()) {
+          setAuthState('authenticated');
+          const dbLlmConfig = parseLlmConfig(config);
+          if (dbLlmConfig) {
+            setLlmConfig(dbLlmConfig);
+          }
+        } else {
+          setAuthState('unauthenticated');
+        }
+      } catch (e) {
+        console.error('Lỗi khởi tạo Auth:', e);
+        setAuthState('setup');
+      }
+    };
+
+    initAuth();
+  }, [supabaseConfig]);
+
+  const handleLogin = async (pin) => {
+    setLoginLoading(true);
+    setLoginError('');
+    try {
+      const valid = await verifyPin(pin, appConfig);
+      if (valid) {
+        saveSession();
+        setAuthState('authenticated');
+        // Đồng bộ LLM config từ Supabase
+        const dbLlmConfig = parseLlmConfig(appConfig);
+        if (dbLlmConfig) {
+          setLlmConfig(dbLlmConfig);
+        }
+      } else {
+        setLoginError('Mã PIN không chính xác. Vui lòng nhập lại!');
+      }
+    } catch (e) {
+      setLoginError('Lỗi kết nối cơ sở dữ liệu. Vui lòng kiểm tra cấu hình Supabase!');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleSetup = async (pin) => {
+    setLoginLoading(true);
+    setLoginError('');
+    try {
+      const success = await setAdminPin(pin);
+      if (success) {
+        saveSession();
+        // Fetch lại config mới
+        const config = await fetchAppConfig();
+        setAppConfig(config);
+        setAuthState('authenticated');
+      } else {
+        setLoginError('Không thể lưu mã PIN mới. Vui lòng kiểm tra phân quyền Supabase!');
+      }
+    } catch (e) {
+      setLoginError('Lỗi kết nối khi thiết lập PIN: ' + e.message);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleSaveLlmConfigToDb = async () => {
+    const success = await saveLlmConfig(llmConfig);
+    if (success) {
+      alert('Đã đồng bộ cấu hình LLM lên Cloud thành công!');
+      const config = await fetchAppConfig();
+      setAppConfig(config);
+    } else {
+      alert('Lỗi lưu cấu hình LLM lên Cloud. Vui lòng thử lại!');
+    }
+  };
+
   // Edit / Add Modal State
   const [editingItem, setEditingItem] = useState(null);
   const [newItemModalOpen, setNewItemModalOpen] = useState(false);
@@ -67,8 +160,10 @@ export default function App() {
   const [showSupabaseModal, setShowSupabaseModal] = useState(false);
   const [isDbConnected, setIsDbConnected] = useState(false);
 
-  // Load items from Supabase or localStorage
+  // Load items from Supabase or localStorage (chỉ chạy khi đã xác thực)
   useEffect(() => {
+    if (authState !== 'authenticated') return;
+
     const supabase = getSupabaseClient();
     if (!supabase) {
       setIsDbConnected(false);
@@ -112,7 +207,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(subscription);
     };
-  }, [supabaseConfig]);
+  }, [supabaseConfig, authState]);
 
   // Save to local storage
   useEffect(() => {
@@ -420,6 +515,23 @@ export default function App() {
     }
   };
 
+  if (authState === 'loading') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-600 to-teal-800 flex flex-col items-center justify-center text-white">
+        <div className="w-12 h-12 rounded-full border-4 border-white border-t-transparent animate-spin mb-4"></div>
+        <p className="text-sm font-semibold">Đang tải cấu hình ứng dụng...</p>
+      </div>
+    );
+  }
+
+  if (authState === 'unauthenticated') {
+    return <LoginScreen onLogin={handleLogin} isLoading={loginLoading} error={loginError} isSetup={false} />;
+  }
+
+  if (authState === 'setup') {
+    return <LoginScreen onSetup={handleSetup} isLoading={loginLoading} error={loginError} isSetup={true} />;
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 pb-24">
       {/* Top Header */}
@@ -475,6 +587,18 @@ export default function App() {
               title="Cấu hình OpenAI Compatible LLM"
             >
               <Key className="w-4 h-4" />
+            </button>
+
+            {/* Nút Đăng xuất */}
+            <button
+              onClick={() => {
+                clearSession();
+                setAuthState('unauthenticated');
+              }}
+              className="p-2 rounded-lg bg-emerald-700 hover:bg-rose-700 text-emerald-100 hover:text-white transition active:scale-95 flex items-center justify-center"
+              title="Đăng xuất"
+            >
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -629,6 +753,47 @@ export default function App() {
                   Nhấn Enter hoặc nút + Thêm. App sẽ tự động chuyển sang model kế tiếp khi model trước bị rate-limit.
                 </p>
               </div>
+
+              <button
+                type="button"
+                onClick={handleSaveLlmConfigToDb}
+                className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 font-bold text-white rounded-xl transition text-xs mt-3 shadow-md"
+              >
+                Lưu cấu hình LLM lên Cloud ☁️
+              </button>
+
+              <div className="border-t border-emerald-700/50 pt-3 mt-3">
+                <label className="block text-[10px] text-emerald-200 font-semibold mb-1">Đổi mã PIN mới:</label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    placeholder="Nhập PIN mới..."
+                    value={newPinInput}
+                    onChange={e => setNewPinInput(e.target.value)}
+                    className="flex-1 px-3 py-1.5 rounded-xl text-slate-800 text-xs outline-none bg-white font-mono text-center tracking-[0.2em]"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!newPinInput.trim()) return;
+                      const success = await setAdminPin(newPinInput.trim());
+                      if (success) {
+                        alert('Đổi mã PIN mới thành công!');
+                        setNewPinInput('');
+                        const config = await fetchAppConfig();
+                        setAppConfig(config);
+                      } else {
+                        alert('Lỗi thiết lập mã PIN!');
+                      }
+                    }}
+                    className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-xl text-xs transition"
+                  >
+                    Đổi PIN
+                  </button>
+                </div>
+              </div>
+
             </div>
           </div>
         )}
