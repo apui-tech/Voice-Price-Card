@@ -68,6 +68,16 @@ export default function App() {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
 
+  // Edit / Add Modal State
+  const [editingItem, setEditingItem] = useState(null);
+  const [newItemModalOpen, setNewItemModalOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', price: '', category: 'rau', unit: 'kg', image: '' });
+
+  // Supabase Database Config State
+  const [supabaseConfig, setSupabaseConfig] = useState(getSupabaseConfig);
+  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
+  const [isDbConnected, setIsDbConnected] = useState(false);
+
   // Khởi tạo xác thực và cấu hình từ Supabase
   useEffect(() => {
     const initAuth = async () => {
@@ -149,16 +159,6 @@ export default function App() {
       alert('Lỗi lưu cấu hình LLM lên Cloud. Vui lòng thử lại!');
     }
   };
-
-  // Edit / Add Modal State
-  const [editingItem, setEditingItem] = useState(null);
-  const [newItemModalOpen, setNewItemModalOpen] = useState(false);
-  const [formData, setFormData] = useState({ name: '', price: '', category: 'rau', unit: 'kg', image: '' });
-
-  // Supabase Database Config State
-  const [supabaseConfig, setSupabaseConfig] = useState(getSupabaseConfig);
-  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
-  const [isDbConnected, setIsDbConnected] = useState(false);
 
   // Load items from Supabase or localStorage (chỉ chạy khi đã xác thực)
   useEffect(() => {
