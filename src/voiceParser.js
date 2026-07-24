@@ -18,7 +18,14 @@ const DICTIONARY_MAP = {
   'rau muong': 'Rau muống',
   'toi': 'Rau mồng tơi',
   'mong toi': 'Rau mồng tơi',
+  'mung toi': 'Rau mồng tơi',
+  'cung toi': 'Rau mồng tơi',
+  'cung toi ta': 'Rau mồng tơi',
+  'mung toi ta': 'Rau mồng tơi',
   'rau mong toi': 'Rau mồng tơi',
+  'rau mung toi': 'Rau mồng tơi',
+  'muop': 'Mướp hương',
+  'muop huong': 'Mướp hương',
   'su hao': 'Su hào',
   'suhao': 'Su hào',
   'bap cai': 'Bắp cải',
@@ -112,46 +119,66 @@ export function getStandardVietnameseName(query, matchedItem) {
 }
 
 /**
- * Match spoken item query to existing items in database
+ * Match spoken item query to all matching existing items in database
  */
-export function matchItem(query, items) {
+export function matchAllItems(query, items) {
   const normQuery = removeAccents(query);
-  if (!normQuery) return null;
+  if (!normQuery) return [];
 
-  // 1. Kiểm tra từ điển từ rút gọn
+  // 1. Nếu khớp chính xác tuyệt đối tên sản phẩm
+  const exactMatches = items.filter(item => {
+    const normName = removeAccents(item.name);
+    return normName === normQuery || (item.keywords && item.keywords.some(k => removeAccents(k) === normQuery));
+  });
+
+  if (exactMatches.length > 0) return exactMatches;
+
+  // 2. Kiểm tra từ điển từ rút gọn
   if (DICTIONARY_MAP[normQuery]) {
     const targetNormName = removeAccents(DICTIONARY_MAP[normQuery]);
-    const found = items.find(item => removeAccents(item.name) === targetNormName);
-    if (found) return found;
+    const found = items.filter(item => removeAccents(item.name) === targetNormName);
+    if (found.length > 0) return found;
   }
 
-  // 2. Tương thích khớp tuyệt đối hoặc từ khóa
-  let matched = items.find(item => 
-    removeAccents(item.name) === normQuery || 
-    (item.keywords && item.keywords.some(k => removeAccents(k) === normQuery))
-  );
-
-  if (matched) return matched;
-
-  // 3. Khớp theo ranh giới từ (Word Boundary / Whole Word Inclusion)
-  matched = items.find(item => {
+  // 3. Khớp từ trùng lặp / khớp một phần (ví dụ đọc "xoài" -> khớp cả "Xoài" và "Xoài cát")
+  const partialMatches = items.filter(item => {
     const normName = removeAccents(item.name);
-    // Ví dụ: query là "cai" sẽ khớp "bap cai" nhưng không khớp "cai rot" (nếu có)
     const nameWords = normName.split(/\s+/);
     const queryWords = normQuery.split(/\s+/);
 
-    return queryWords.every(qw => nameWords.includes(qw)) || nameWords.every(nw => queryWords.includes(nw));
+    const wordMatch = queryWords.every(qw => nameWords.includes(qw)) || nameWords.every(nw => queryWords.includes(nw));
+    const subMatch = normName.includes(normQuery) || normQuery.includes(normName);
+
+    return wordMatch || subMatch;
   });
 
-  if (matched) return matched;
+  return partialMatches;
+}
 
-  // 4. Tương thích khớp một phần (substring)
-  matched = items.find(item => {
-    const normName = removeAccents(item.name);
-    return normName.includes(normQuery) || normQuery.includes(normName);
-  });
+/**
+ * Match spoken item query to existing items in database
+ */
+export function matchItem(query, items) {
+  const matches = matchAllItems(query, items);
+  return matches.length > 0 ? matches[0] : null;
+}
 
-  return matched || null;
+/**
+ * Parse a voice search query to return all matching items
+ */
+export function parseVoiceSearch(text, existingItems) {
+  if (!text) return [];
+  
+  let clean = removeAccents(text)
+    .replace(/gia/g, '')
+    .replace(/bao nhieu/g, '')
+    .replace(/bao nhieu tien/g, '')
+    .replace(/tim/g, '')
+    .replace(/tim kiem/g, '')
+    .replace(/hoi/g, '')
+    .trim();
+
+  return matchAllItems(clean, existingItems);
 }
 
 /**
@@ -203,22 +230,4 @@ export function parseVoiceUpdate(text, originalRawText = '', existingItems) {
   }
 
   return updates;
-}
-
-/**
- * Parse a voice search query
- */
-export function parseVoiceSearch(text, existingItems) {
-  if (!text) return null;
-  
-  let clean = removeAccents(text)
-    .replace(/gia/g, '')
-    .replace(/bao nhieu/g, '')
-    .replace(/bao nhieu tien/g, '')
-    .replace(/tim/g, '')
-    .replace(/tim kiem/g, '')
-    .replace(/hoi/g, '')
-    .trim();
-
-  return matchItem(clean, existingItems);
 }

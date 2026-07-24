@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Mic, MicOff, Search, Plus, RefreshCw, Volume2, Sparkles, 
-  Tag, Filter, CheckCircle2, Edit3, Trash2, X, AlertCircle, Key, Cpu, Clock
+  Tag, Filter, CheckCircle2, Edit3, Trash2, X, AlertCircle, Key, Cpu, Clock, Undo2, Database
 } from 'lucide-react';
 import { INITIAL_ITEMS, CATEGORY_MAP } from './data';
-import { parseVoiceSearch, removeAccents, getStandardVietnameseName } from './voiceParser';
+import { parseVoiceSearch, removeAccents, getStandardVietnameseName, parseVoiceUpdate } from './voiceParser';
 import { extractItemsWithLLM } from './llmService';
+import { getSupabaseClient, getSupabaseConfig, resetSupabaseClient } from './supabase';
 
 export default function App() {
   const [items, setItems] = useState(() => {
@@ -33,14 +34,25 @@ export default function App() {
   const [llmConfig, setLlmConfig] = useState(() => {
     const saved = localStorage.getItem('openai_llm_config');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) {}
+      try {
+        const parsed = JSON.parse(saved);
+        // Migration: nếu có model (string cũ) nhưng chưa có models (array mới)
+        if (parsed.model && !parsed.models) {
+          parsed.models = parsed.model.split(',').map(m => m.trim()).filter(Boolean);
+        }
+        if (!parsed.models) parsed.models = ['llama-3.3-70b-versatile'];
+        return parsed;
+      } catch (e) {}
     }
     return {
       apiKey: localStorage.getItem('gemini_api_key') || '',
-      baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-4o-mini'
+      baseUrl: 'https://api.groq.com/openai/v1',
+      models: ['llama-3.3-70b-versatile', 'llama3-8b-8192']
     };
   });
+
+  // State ô nhập model mới trong UI
+  const [modelInput, setModelInput] = useState('');
 
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
@@ -50,6 +62,58 @@ export default function App() {
   const [newItemModalOpen, setNewItemModalOpen] = useState(false);
   const [formData, setFormData] = useState({ name: '', price: '', category: 'rau', unit: 'kg', image: '' });
 
+  // Supabase Database Config State
+  const [supabaseConfig, setSupabaseConfig] = useState(getSupabaseConfig);
+  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
+  const [isDbConnected, setIsDbConnected] = useState(false);
+
+  // Load items from Supabase or localStorage
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      setIsDbConnected(false);
+      return;
+    }
+
+    // Load initial items from Supabase DB
+    const fetchFromSupabase = async () => {
+      try {
+        const { data, error } = await supabase.from('items').select('*').order('created_at', { ascending: false });
+        if (!error && data) {
+          setIsDbConnected(true);
+          const formatted = data.map(i => ({
+            id: i.id,
+            name: i.name,
+            price: i.price,
+            category: i.category || 'rau',
+            unit: i.unit || 'kg',
+            image: i.image,
+            updatedAt: i.updated_at || i.created_at,
+            keywords: i.keywords || [removeAccents(i.name)]
+          }));
+          setItems(formatted);
+        }
+      } catch (err) {
+        console.warn('Không thể kết nối Supabase, chuyển sang xài Local Storage...', err);
+        setIsDbConnected(false);
+      }
+    };
+
+    fetchFromSupabase();
+
+    // Supabase Realtime Subscription (Đồng bộ tức thì giữa Mẹ & Bố)
+    const subscription = supabase
+      .channel('public:items')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => {
+        fetchFromSupabase();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
+  }, [supabaseConfig]);
+
   // Save to local storage
   useEffect(() => {
     localStorage.setItem('voice_price_items', JSON.stringify(items));
@@ -58,6 +122,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('openai_llm_config', JSON.stringify(llmConfig));
   }, [llmConfig]);
+
+  const handleSaveSupabaseConfig = (url, key) => {
+    localStorage.setItem('supabase_url', url);
+    localStorage.setItem('supabase_anon_key', key);
+    resetSupabaseClient();
+    setSupabaseConfig({ url, anonKey: key });
+    setShowSupabaseModal(false);
+  };
 
   const startListening = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -75,6 +147,9 @@ export default function App() {
       setIsListening(true);
       setSpeechStatus(voiceMode === 'update' ? 'Đang lắng nghe mẹ đọc giá...' : 'Đang lắng nghe từ khóa tìm kiếm...');
       setTranscript('');
+      if (voiceMode === 'search') {
+        setSearchMatchedIds([]); // Reset kết quả tra cứu của lần trước
+      }
     };
 
     recognition.onresult = (event) => {
@@ -85,11 +160,15 @@ export default function App() {
       setTranscript(currentTranscript);
 
       if (voiceMode === 'search') {
-        const matched = parseVoiceSearch(currentTranscript, items);
-        if (matched) {
-          setHighlightedItemId(matched.id);
-          const matchedDisplayName = getStandardVietnameseName(matched.name, matched);
-          setSpeechStatus(`Đã tìm thấy: ${matchedDisplayName} - ${matched.price}k/${matched.unit}`);
+        const matches = parseVoiceSearch(currentTranscript, items);
+        if (matches && matches.length > 0) {
+          const ids = matches.map(m => m.id);
+          setSearchMatchedIds(ids);
+          const namesStr = matches.map(m => m.name).join(', ');
+          setSpeechStatus(`Đã tìm thấy ${matches.length} sản phẩm: ${namesStr}`);
+        } else {
+          setSearchMatchedIds([]); // Không tìm thấy -> Xóa kết quả cũ ngay lập tức
+          setSpeechStatus(`Không tìm thấy mặt hàng: "${currentTranscript.trim()}"`);
         }
       }
     };
@@ -121,58 +200,125 @@ export default function App() {
 
   const processVoiceUpdateText = async (text) => {
     setIsAiProcessing(true);
-    setSpeechStatus(llmConfig.apiKey ? '🤖 LLM AI đang phân tích tên & giá...' : '⚡ AI Engine đang phân tích...');
+    let updates = [];
+    let aiSource = 'fallback';
+    let aiModel = '';
+    let errorMsg = null;
 
-    const updates = await extractItemsWithLLM(text, items, llmConfig);
+    if (llmConfig.apiKey) {
+      const modelNames = (llmConfig.models || []).join(' → ');
+      setSpeechStatus(`🤖 AI LLM (${modelNames || 'OpenAI'}) đang phân tích...`);
+      const res = await extractItemsWithLLM(text, items, llmConfig);
+      if (res && !res.error) {
+        updates = Array.isArray(res) ? res : (res.items || []);
+        aiSource = res.source || 'llm';
+        aiModel = res.model || llmConfig.model || 'OpenAI';
+      } else {
+        errorMsg = res?.error || 'Lỗi không xác định khi gọi LLM';
+      }
+    }
+
+    // Nếu không có API Key, hoặc gọi LLM bị lỗi, hoặc LLM không trích xuất được mặt hàng nào, dùng bộ phân tích nội bộ (Local Parser) làm dự phòng
+    if (!llmConfig.apiKey || updates.length === 0) {
+      setSpeechStatus('⚡ AI Engine nội bộ đang phân tích...');
+      const localUpdates = parseVoiceUpdate(text, text, items);
+      if (localUpdates && localUpdates.length > 0) {
+        updates = localUpdates.map(up => ({
+          matchedItem: up.matchedItem,
+          matchedName: up.matchedName,
+          newPrice: up.newPrice,
+          category: up.matchedItem ? up.matchedItem.category : 'rau',
+          unit: up.matchedItem ? up.matchedItem.unit : 'kg'
+        }));
+        aiSource = 'fallback';
+        errorMsg = null; // Bỏ qua lỗi LLM vì đã tự động khôi phục bằng bộ phân tích nội bộ
+      }
+    }
+
     setIsAiProcessing(false);
 
+    if (errorMsg && updates.length === 0) {
+      setSpeechStatus(`❌ Lỗi LLM Cloud: ${errorMsg}`);
+      return;
+    }
+
     if (updates.length === 0) {
-      setSpeechStatus('Không tìm thấy tên & giá hợp lệ. Mẹ hãy đọc lại theo mẫu: "muống 10, su hào 5"');
+      setSpeechStatus('🤖 Không tìm thấy tên & giá hợp lệ trong câu đọc. Mẹ hãy đọc lại theo mẫu: "muống 10, su hào 5"');
       return;
     }
 
     const newLogs = [];
-    setItems(prevItems => {
-      let updatedList = [...prevItems];
+    const supabase = getSupabaseClient();
+    const newItemsToInsert = [];
 
-      updates.forEach(up => {
-        if (up.matchedItem) {
-          updatedList = updatedList.map(item => {
-            if (item.id === up.matchedItem.id) {
-              newLogs.push(`Đã cập nhật ${item.name}: ${item.price}k ➔ ${up.newPrice}k`);
-              return { ...item, price: up.newPrice, updatedAt: new Date().toISOString() };
-            }
-            return item;
-          });
-        } else {
-          let defaultImg = 'https://images.unsplash.com/photo-1540420773420-3366772f4999?auto=format&fit=crop&w=400&q=80';
-          if (up.category === 'qua') {
-            defaultImg = 'https://images.unsplash.com/photo-1619566636858-adf3ef46400b?auto=format&fit=crop&w=400&q=80';
-          } else if (up.category === 'kho') {
-            defaultImg = 'https://images.unsplash.com/photo-1618512496248-a07fe83aa8cb?auto=format&fit=crop&w=400&q=80';
+    // Duyệt danh sách update để chuẩn bị log và dữ liệu trước khi set state
+    let updatedList = [...items];
+
+    for (const up of updates) {
+      const existing = updatedList.find(ex => removeAccents(ex.name) === removeAccents(up.matchedName) || (up.matchedItem && ex.id === up.matchedItem.id));
+
+      if (existing) {
+        updatedList = updatedList.map(item => {
+          if (item.id === existing.id) {
+            return { ...item, price: up.newPrice, updatedAt: new Date().toISOString() };
           }
+          return item;
+        });
+        newLogs.push(`Đã cập nhật ${existing.name}: ${existing.price}k ➔ ${up.newPrice}k`);
 
-          const newItem = {
-            id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
-            name: up.matchedName,
-            price: up.newPrice,
-            category: up.category || 'rau',
-            unit: up.unit || 'kg',
-            image: defaultImg,
-            updatedAt: new Date().toISOString(),
-            keywords: [removeAccents(up.matchedName)]
-          };
-          updatedList.unshift(newItem);
-          newLogs.push(`Đã thêm mới ${newItem.name}: ${up.newPrice}k`);
+        if (supabase) {
+          const { error } = await supabase.from('items')
+            .update({ price: up.newPrice, updated_at: new Date().toISOString() })
+            .eq('id', existing.id);
+          if (error) {
+            console.error('Lỗi cập nhật Supabase cho sản phẩm ' + existing.name + ':', error);
+          }
         }
-      });
+      } else {
+        let defaultImg = '/placeholder.svg';
 
-      return updatedList;
-    });
+        const newItem = {
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
+          name: up.matchedName,
+          price: up.newPrice,
+          category: up.category || 'rau',
+          unit: up.unit || 'kg',
+          image: defaultImg,
+          updatedAt: new Date().toISOString(),
+          keywords: [removeAccents(up.matchedName)]
+        };
+        updatedList.unshift(newItem);
+        newLogs.push(`Đã thêm mới ${newItem.name}: ${up.newPrice}k`);
+        newItemsToInsert.push(newItem);
+      }
+    }
+
+    setItems(updatedList);
+
+    // Đẩy dữ liệu mới tạo lên Supabase DB
+    if (supabase && newItemsToInsert.length > 0) {
+      const records = newItemsToInsert.map(newItem => ({
+        id: newItem.id,
+        name: newItem.name,
+        price: newItem.price,
+        category: newItem.category,
+        unit: newItem.unit,
+        image: newItem.image,
+        updated_at: newItem.updatedAt,
+        keywords: newItem.keywords
+      }));
+      await supabase.from('items').insert(records);
+    }
 
     setLastUpdatedLog(newLogs);
-    setSpeechStatus(`✨ AI trích xuất thành công ${updates.length} thẻ giá!`);
+    if (aiSource === 'llm') {
+      setSpeechStatus(`🤖 [LLM Model: ${aiModel}] Trích xuất thành công ${updates.length} thẻ giá!`);
+    } else {
+      setSpeechStatus(`⚡ [AI Engine Nội bộ] Trích xuất thành công ${updates.length} thẻ giá!`);
+    }
   };
+
+  const [searchMatchedIds, setSearchMatchedIds] = useState([]);
 
   const filteredItems = items.filter(item => {
     const normSearch = removeAccents(searchQuery);
@@ -185,8 +331,8 @@ export default function App() {
 
     // Nếu đang ở chế độ Bố / Bạn đọc tra cứu bằng giọng nói (và không gõ ô tìm kiếm)
     if (voiceMode === 'search') {
-      if (!highlightedItemId) return false; // Chưa đọc tra cứu -> Không hiện danh sách
-      return item.id === highlightedItemId; // Chỉ hiển thị đúng sản phẩm tìm được
+      if (searchMatchedIds.length === 0) return false; // Chưa đọc tra cứu -> Không hiện danh sách
+      return searchMatchedIds.includes(item.id); // Hiển thị TẤT CẢ sản phẩm trùng khớp
     }
 
     // Chế độ Mẹ nhập giá
@@ -194,19 +340,31 @@ export default function App() {
     return matchesCategory;
   });
 
-  const handleSaveItem = (e) => {
+  const handleSaveItem = async (e) => {
     e.preventDefault();
     if (!formData.name || !formData.price) return;
+    const supabase = getSupabaseClient();
 
     if (editingItem) {
-      setItems(items.map(i => i.id === editingItem.id ? {
-        ...i,
+      const updatedData = {
         name: formData.name,
         price: Number(formData.price),
         category: formData.category,
         unit: formData.unit,
-        image: formData.image || i.image
-      } : i));
+        image: '/placeholder.svg',
+      };
+
+      setItems(items.map(i => i.id === editingItem.id ? { ...i, ...updatedData } : i));
+      if (supabase) {
+        await supabase.from('items').update({
+          name: updatedData.name,
+          price: updatedData.price,
+          category: updatedData.category,
+          unit: updatedData.unit,
+          image: updatedData.image,
+          updated_at: new Date().toISOString()
+        }).eq('id', editingItem.id);
+      }
       setEditingItem(null);
     } else {
       const newItem = {
@@ -215,26 +373,77 @@ export default function App() {
         price: Number(formData.price),
         category: formData.category,
         unit: formData.unit,
-        image: formData.image || 'https://images.unsplash.com/photo-1540420773420-3366772f4999?auto=format&fit=crop&w=400&q=80',
+        image: formData.image || '/placeholder.svg',
         updatedAt: new Date().toISOString(),
         keywords: [removeAccents(formData.name)]
       };
       setItems([newItem, ...items]);
+      if (supabase) {
+        await supabase.from('items').insert({
+          id: newItem.id,
+          name: newItem.name,
+          price: newItem.price,
+          category: newItem.category,
+          unit: newItem.unit,
+          image: newItem.image,
+          updated_at: newItem.updatedAt,
+          keywords: newItem.keywords
+        });
+      }
       setNewItemModalOpen(false);
     }
     setFormData({ name: '', price: '', category: 'rau', unit: 'kg', image: '' });
   };
 
-  const handleDeleteItem = (id) => {
-    if (confirm('Bạn có chắc chắn muốn xóa mặt hàng này?')) {
+  // State hỗ trợ Hoàn tác sản phẩm vừa xóa
+  const [lastDeletedItem, setLastDeletedItem] = useState(null);
+
+  const handleDeleteItem = async (id) => {
+    const itemToDelete = items.find(i => i.id === id);
+    if (itemToDelete) {
+      setLastDeletedItem(itemToDelete);
       setItems(items.filter(i => i.id !== id));
+      setSpeechStatus(`Đã xóa ${itemToDelete.name}`);
+
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        await supabase.from('items').delete().eq('id', id);
+      }
     }
   };
 
-  const resetDefaultData = () => {
-    if (confirm('Khôi phục danh sách rau & hàng khô mặc định?')) {
-      setItems(INITIAL_ITEMS);
-      localStorage.removeItem('voice_price_items');
+  const handleUndoDelete = async () => {
+    if (lastDeletedItem) {
+      setItems(prev => [lastDeletedItem, ...prev]);
+      setSpeechStatus(`Đã hoàn tác sản phẩm ${lastDeletedItem.name}`);
+
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        await supabase.from('items').insert({
+          id: lastDeletedItem.id,
+          name: lastDeletedItem.name,
+          price: lastDeletedItem.price,
+          category: lastDeletedItem.category,
+          unit: lastDeletedItem.unit,
+          image: lastDeletedItem.image,
+          updated_at: lastDeletedItem.updatedAt,
+          keywords: lastDeletedItem.keywords
+        });
+      }
+      setLastDeletedItem(null);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (items.length === 0) return;
+    if (confirm('Bạn có chắc chắn muốn XÓA TẤT CẢ các thẻ giá hiện tại không?')) {
+      setItems([]);
+      setSpeechStatus('Đã xóa sạch tất cả sản phẩm!');
+
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        await supabase.from('items').delete().neq('id', '');
+      }
     }
   };
 
@@ -250,15 +459,43 @@ export default function App() {
             <div>
               <h1 className="font-bold text-lg leading-tight flex items-center gap-1.5">
                 Sổ Giá Giọng Nói
-                <span className="bg-emerald-800/80 text-[10px] px-1.5 py-0.5 rounded-full border border-emerald-400/30 flex items-center gap-0.5">
-                  <Sparkles className="w-3 h-3 text-amber-300" /> AI LLM
-                </span>
               </h1>
               <p className="text-xs text-emerald-100">Đọc giá thông minh • Trích xuất bằng AI</p>
             </div>
           </div>
           
           <div className="flex items-center space-x-1.5">
+            {/* Nút Khôi phục sản phẩm vừa xóa (Undo) */}
+            {lastDeletedItem && (
+              <button
+                onClick={handleUndoDelete}
+                className="p-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs flex items-center gap-1 shadow-sm animate-bounce"
+                title={`Khôi phục ${lastDeletedItem.name}`}
+              >
+                <Undo2 className="w-4 h-4" />
+                <span className="hidden sm:inline">Khôi phục</span>
+              </button>
+            )}
+
+            {/* Nút Xóa tất cả */}
+            {items.length > 0 && (
+              <button 
+                onClick={handleClearAll} 
+                title="Xóa tất cả sản phẩm"
+                className="p-2 rounded-lg bg-rose-700 hover:bg-rose-800 text-rose-100 transition active:scale-95 flex items-center gap-1"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              onClick={() => setShowSupabaseModal(!showSupabaseModal)}
+              className={`p-2 rounded-lg transition ${isDbConnected ? 'bg-emerald-500 text-white font-bold ring-2 ring-emerald-300' : 'bg-emerald-700 text-emerald-100 hover:bg-emerald-800'}`}
+              title="Cấu hình Cloud Supabase Database"
+            >
+              <Database className="w-4 h-4" />
+            </button>
+
             <button
               onClick={() => setShowApiKeyInput(!showApiKeyInput)}
               className={`p-2 rounded-lg transition ${llmConfig.apiKey ? 'bg-amber-500 text-white' : 'bg-emerald-700 text-emerald-100 hover:bg-emerald-800'}`}
@@ -266,15 +503,57 @@ export default function App() {
             >
               <Key className="w-4 h-4" />
             </button>
-            <button 
-              onClick={resetDefaultData} 
-              title="Khôi phục mặc định"
-              className="p-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-emerald-100 transition active:scale-95"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
           </div>
         </div>
+
+        {/* Supabase Database Config Modal */}
+        {showSupabaseModal && (
+          <div className="max-w-md mx-auto mt-3 p-3.5 bg-slate-900 rounded-2xl text-xs space-y-2.5 border border-slate-700 animate-fadeIn text-white shadow-lg">
+            <div className="flex items-center justify-between font-bold border-b border-slate-700 pb-2">
+              <span className="flex items-center gap-1.5 text-emerald-400 text-sm">
+                <Database className="w-4 h-4" /> Cấu Hình Supabase DB (Đồng bộ Realtime)
+              </span>
+              <button onClick={() => setShowSupabaseModal(false)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-slate-300 leading-relaxed text-[11px]">
+              Dán URL & Anon Key từ dự án Supabase miễn phí của bạn để đồng bộ giá tức thì 24/7 giữa máy Mẹ & Bố.
+            </p>
+
+            <div className="space-y-2 pt-1">
+              <div>
+                <label className="block text-[10px] text-slate-300 font-semibold mb-0.5">Project URL:</label>
+                <input
+                  type="text"
+                  placeholder="https://xyz.supabase.co"
+                  value={supabaseConfig.url}
+                  onChange={(e) => setSupabaseConfig({ ...supabaseConfig, url: e.target.value })}
+                  className="w-full px-3 py-1.5 rounded-xl text-slate-800 text-xs outline-none bg-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] text-slate-300 font-semibold mb-0.5">Anon Public Key:</label>
+                <input
+                  type="password"
+                  placeholder="eyJhbGciOiJIUzI1NiI..."
+                  value={supabaseConfig.anonKey}
+                  onChange={(e) => setSupabaseConfig({ ...supabaseConfig, anonKey: e.target.value })}
+                  className="w-full px-3 py-1.5 rounded-xl text-slate-800 text-xs outline-none bg-white font-mono"
+                />
+              </div>
+
+              <button
+                onClick={() => handleSaveSupabaseConfig(supabaseConfig.url, supabaseConfig.anonKey)}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 font-bold text-white rounded-xl transition"
+              >
+                Lưu Kết Nối Supabase DB
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* OpenAI Compatible Config Banner */}
         {showApiKeyInput && (
@@ -316,14 +595,66 @@ export default function App() {
               </div>
 
               <div>
-                <label className="block text-[10px] text-emerald-200 font-semibold mb-0.5">Model Name:</label>
-                <input
-                  type="text"
-                  placeholder="gpt-4o-mini, deepseek-chat, gemini-2.5-flash..."
-                  value={llmConfig.model}
-                  onChange={(e) => setLlmConfig({ ...llmConfig, model: e.target.value })}
-                  className="w-full px-3 py-1.5 rounded-xl text-slate-800 text-xs outline-none bg-white font-mono"
-                />
+                <label className="block text-[10px] text-emerald-200 font-semibold mb-1">Model Ưu Tiên (tự động chuyển nếu hết quota):</label>
+                {/* Hiển thị tags model hiện tại */}
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {(llmConfig.models || []).map((m, idx) => (
+                    <span
+                      key={idx}
+                      className="flex items-center gap-1 bg-emerald-700/70 border border-emerald-500/60 text-emerald-100 px-2 py-0.5 rounded-lg text-[11px] font-mono"
+                    >
+                      <span className="text-emerald-300 font-bold text-[10px]">{idx + 1}.</span>
+                      {m}
+                      <button
+                        type="button"
+                        onClick={() => setLlmConfig(prev => ({ ...prev, models: prev.models.filter((_, i) => i !== idx) }))}
+                        className="ml-0.5 text-emerald-300 hover:text-rose-300 transition"
+                        title="Xóa model này"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  {(llmConfig.models || []).length === 0 && (
+                    <span className="text-emerald-400 text-[11px] italic">Chưa có model nào</span>
+                  )}
+                </div>
+                {/* Ô nhập thêm model mới */}
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="Ví dụ: llama-3.3-70b-versatile"
+                    value={modelInput}
+                    onChange={e => setModelInput(e.target.value)}
+                    onKeyDown={e => {
+                      if ((e.key === 'Enter' || e.key === ',') && modelInput.trim()) {
+                        e.preventDefault();
+                        const newModel = modelInput.trim().replace(/,$/, '');
+                        if (newModel && !(llmConfig.models || []).includes(newModel)) {
+                          setLlmConfig(prev => ({ ...prev, models: [...(prev.models || []), newModel] }));
+                        }
+                        setModelInput('');
+                      }
+                    }}
+                    className="flex-1 px-3 py-1.5 rounded-xl text-slate-800 text-xs outline-none bg-white font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newModel = modelInput.trim();
+                      if (newModel && !(llmConfig.models || []).includes(newModel)) {
+                        setLlmConfig(prev => ({ ...prev, models: [...(prev.models || []), newModel] }));
+                      }
+                      setModelInput('');
+                    }}
+                    className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-xl text-xs transition"
+                  >
+                    + Thêm
+                  </button>
+                </div>
+                <p className="text-[10px] text-emerald-300/70 mt-1">
+                  Nhấn Enter hoặc nút + Thêm. App sẽ tự động chuyển sang model kế tiếp khi model trước bị rate-limit.
+                </p>
               </div>
             </div>
           </div>
@@ -335,7 +666,7 @@ export default function App() {
         {/* Mode Switcher Tabs */}
         <div className="bg-slate-200/80 p-1 rounded-2xl flex text-xs font-semibold">
           <button
-            onClick={() => { setVoiceMode('update'); setSpeechStatus(''); setHighlightedItemId(null); }}
+            onClick={() => { setVoiceMode('update'); setSpeechStatus(''); setSearchMatchedIds([]); }}
             className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5 ${
               voiceMode === 'update' ? 'bg-white shadow-sm text-emerald-700 font-bold' : 'text-slate-600'
             }`}
@@ -344,7 +675,7 @@ export default function App() {
             <span>Mẹ Đọc Nhập Giá</span>
           </button>
           <button
-            onClick={() => { setVoiceMode('search'); setSpeechStatus(''); setHighlightedItemId(null); }}
+            onClick={() => { setVoiceMode('search'); setSpeechStatus(''); setSearchMatchedIds([]); }}
             className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5 ${
               voiceMode === 'search' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-slate-600'
             }`}
@@ -404,6 +735,21 @@ export default function App() {
             <div className="mt-2 text-xs font-semibold text-slate-600 flex items-center justify-center space-x-1">
               {isAiProcessing && <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-spin" />}
               <span>{speechStatus}</span>
+            </div>
+          )}
+
+          {/* Toast thông báo hoàn tác khi vừa xóa sản phẩm */}
+          {lastDeletedItem && (
+            <div className="mt-3 w-full bg-amber-50 p-2.5 rounded-xl border border-amber-200 flex items-center justify-between text-xs animate-fadeIn">
+              <span className="text-amber-800">
+                Đã xóa <strong>{lastDeletedItem.name}</strong>
+              </span>
+              <button
+                onClick={handleUndoDelete}
+                className="font-bold text-amber-700 hover:text-amber-900 bg-amber-200/80 px-2.5 py-1 rounded-lg flex items-center gap-1 transition"
+              >
+                <Undo2 className="w-3.5 h-3.5" /> Hoàn tác
+              </button>
             </div>
           )}
 
@@ -501,16 +847,14 @@ export default function App() {
                     : 'border-slate-100 hover:border-slate-200'
                 }`}
               >
-                {/* Image & Category Badge */}
-                <div className="relative w-full h-28 rounded-xl overflow-hidden mb-2 bg-slate-100">
-                  <img
-                    src={item.image}
-                    alt={displayName}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                  <span className="absolute top-1.5 left-1.5 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-white/90 backdrop-blur-md shadow-sm text-slate-700">
-                    {cat.icon} {cat.label}
+                {/* Image Placeholder showing Product Name */}
+                <div className="relative w-full h-28 rounded-xl overflow-hidden mb-2 bg-gradient-to-br from-emerald-500 to-teal-700 flex flex-col items-center justify-center p-3 text-center text-white shadow-inner">
+                  <div className="text-3xl mb-1 drop-shadow-sm">{cat.icon}</div>
+                  <h4 className="font-extrabold text-lg leading-tight drop-shadow-md text-white line-clamp-2 px-1">
+                    {displayName}
+                  </h4>
+                  <span className="absolute top-1.5 left-1.5 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-black/20 backdrop-blur-md text-emerald-100">
+                    {cat.label}
                   </span>
 
                   {/* Actions overlay */}
@@ -543,8 +887,7 @@ export default function App() {
 
                 {/* Info */}
                 <div>
-                  <h3 className="font-bold text-base text-slate-800 line-clamp-1">{displayName}</h3>
-                  <div className="mt-1 flex items-baseline justify-between">
+                  <div className="flex items-baseline justify-between">
                     <div className="flex items-baseline">
                       <span className="text-2xl font-black text-emerald-600">{item.price}k</span>
                       <span className="text-xs text-slate-500 font-bold ml-1">/{item.unit}</span>
@@ -658,16 +1001,7 @@ export default function App() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Link Ảnh (Không bắt buộc)</label>
-                <input
-                  type="url"
-                  placeholder="https://..."
-                  value={formData.image}
-                  onChange={e => setFormData({ ...formData, image: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none text-xs"
-                />
-              </div>
+
 
               <div className="pt-2 flex space-x-2">
                 <button
