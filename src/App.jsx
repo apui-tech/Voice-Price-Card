@@ -987,7 +987,6 @@ export default function App() {
               >
                 {/* Image Placeholder showing Product Name */}
                 <div className="relative w-full h-28 rounded-xl overflow-hidden mb-2 bg-gradient-to-br from-emerald-500 to-teal-700 flex flex-col items-center justify-center p-3 text-center text-white shadow-inner">
-                  <div className="text-3xl mb-1 drop-shadow-sm">{cat.icon}</div>
                   <h4 className="font-extrabold text-lg leading-tight drop-shadow-md text-white line-clamp-2 px-1">
                     {displayName}
                   </h4>
