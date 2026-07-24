@@ -4,7 +4,7 @@ import {
   Tag, Filter, CheckCircle2, Edit3, Trash2, X, AlertCircle, Key, Cpu, Clock, Undo2, Database
 } from 'lucide-react';
 import { INITIAL_ITEMS, CATEGORY_MAP } from './data';
-import { parseVoiceSearch, removeAccents, getStandardVietnameseName, parseVoiceUpdate } from './voiceParser';
+import { parseVoiceSearch, removeAccents, getStandardVietnameseName } from './voiceParser';
 import { extractItemsWithLLM } from './llmService';
 import { getSupabaseClient, getSupabaseConfig, resetSupabaseClient } from './supabase';
 
@@ -199,51 +199,28 @@ export default function App() {
   };
 
   const processVoiceUpdateText = async (text) => {
-    setIsAiProcessing(true);
-    let updates = [];
-    let aiSource = 'fallback';
-    let aiModel = '';
-    let errorMsg = null;
-
-    if (llmConfig.apiKey) {
-      const modelNames = (llmConfig.models || []).join(' → ');
-      setSpeechStatus(`🤖 AI LLM (${modelNames || 'OpenAI'}) đang phân tích...`);
-      const res = await extractItemsWithLLM(text, items, llmConfig);
-      if (res && !res.error) {
-        updates = Array.isArray(res) ? res : (res.items || []);
-        aiSource = res.source || 'llm';
-        aiModel = res.model || llmConfig.model || 'OpenAI';
-      } else {
-        errorMsg = res?.error || 'Lỗi không xác định khi gọi LLM';
-      }
-    }
-
-    // Nếu không có API Key, hoặc gọi LLM bị lỗi, hoặc LLM không trích xuất được mặt hàng nào, dùng bộ phân tích nội bộ (Local Parser) làm dự phòng
-    if (!llmConfig.apiKey || updates.length === 0) {
-      setSpeechStatus('⚡ AI Engine nội bộ đang phân tích...');
-      const localUpdates = parseVoiceUpdate(text, text, items);
-      if (localUpdates && localUpdates.length > 0) {
-        updates = localUpdates.map(up => ({
-          matchedItem: up.matchedItem,
-          matchedName: up.matchedName,
-          newPrice: up.newPrice,
-          category: up.matchedItem ? up.matchedItem.category : 'rau',
-          unit: up.matchedItem ? up.matchedItem.unit : 'kg'
-        }));
-        aiSource = 'fallback';
-        errorMsg = null; // Bỏ qua lỗi LLM vì đã tự động khôi phục bằng bộ phân tích nội bộ
-      }
-    }
-
-    setIsAiProcessing(false);
-
-    if (errorMsg && updates.length === 0) {
-      setSpeechStatus(`❌ Lỗi LLM Cloud: ${errorMsg}`);
+    if (!llmConfig.apiKey) {
+      setSpeechStatus('❌ Chưa có API Key. Nhấn 🔑 để nhập API Key!');
       return;
     }
 
+    setIsAiProcessing(true);
+    const modelNames = (llmConfig.models || []).join(' → ');
+    setSpeechStatus(`🤖 AI LLM (${modelNames || 'OpenAI'}) đang phân tích...`);
+
+    const res = await extractItemsWithLLM(text, items, llmConfig);
+    setIsAiProcessing(false);
+
+    if (res.error) {
+      setSpeechStatus(`❌ Lỗi LLM: ${res.error}`);
+      return;
+    }
+
+    const updates = Array.isArray(res) ? res : (res.items || []);
+    const aiModel = res.model || (llmConfig.models || [])[0] || 'OpenAI';
+
     if (updates.length === 0) {
-      setSpeechStatus('🤖 Không tìm thấy tên & giá hợp lệ trong câu đọc. Mẹ hãy đọc lại theo mẫu: "muống 10, su hào 5"');
+      setSpeechStatus('Mẹ hãy đọc rõ tên mặt hàng và giá. Ví dụ: "muống 10, su hào 5"');
       return;
     }
 
@@ -311,11 +288,7 @@ export default function App() {
     }
 
     setLastUpdatedLog(newLogs);
-    if (aiSource === 'llm') {
-      setSpeechStatus(`🤖 [LLM Model: ${aiModel}] Trích xuất thành công ${updates.length} thẻ giá!`);
-    } else {
-      setSpeechStatus(`⚡ [AI Engine Nội bộ] Trích xuất thành công ${updates.length} thẻ giá!`);
-    }
+    setSpeechStatus(`🤖 [${aiModel}] Trích xuất thành công ${updates.length} thẻ giá!`);
   };
 
   const [searchMatchedIds, setSearchMatchedIds] = useState([]);
@@ -568,7 +541,7 @@ export default function App() {
             </div>
             
             <p className="text-emerald-100 leading-relaxed text-[11px]">
-              Tương thích với OpenAI, Gemini OpenAI Endpoint, DeepSeek, Groq hoặc Ollama local. Để trống nếu muốn dùng **AI Engine nội bộ miễn phí**.
+              Tương thích với OpenAI, Gemini OpenAI Endpoint, DeepSeek, Groq hoặc Ollama local.
             </p>
 
             <div className="space-y-2 pt-1">

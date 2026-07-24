@@ -1,4 +1,3 @@
-import { parseVoiceUpdate } from './voiceParser';
 
 // Các mã lỗi HTTP cần thử chuyển sang model tiếp theo
 const FALLBACK_HTTP_CODES = new Set([429, 402, 503, 529]);
@@ -112,8 +111,6 @@ Chỉ trả về JSON thuần túy, không kèm Markdown hay lời giải thích
       const parsedArray = JSON.parse(cleanJson);
 
       if (Array.isArray(parsedArray)) {
-        const localUpdates = parseVoiceUpdate(text, text, existingItems);
-
         const mapped = parsedArray.map(item => {
           const normName = removeAccents(item.name);
           const matched = existingItems.find(ex => removeAccents(ex.name) === normName);
@@ -125,14 +122,7 @@ Chỉ trả về JSON thuần túy, không kèm Markdown hay lời giải thích
           } else {
             priceVal = parseInt(priceVal, 10);
           }
-
-          if (isNaN(priceVal) || priceVal <= 0) {
-            const localMatch = localUpdates.find(lu => {
-              const normLocal = removeAccents(lu.matchedName);
-              return normLocal === normName || normName.includes(normLocal) || normLocal.includes(normName);
-            });
-            priceVal = (localMatch && localMatch.newPrice > 0) ? localMatch.newPrice : 0;
-          }
+          if (isNaN(priceVal) || priceVal < 0) priceVal = 0;
 
           return {
             matchedItem: matched,
@@ -165,86 +155,4 @@ Chỉ trả về JSON thuần túy, không kèm Markdown hay lời giải thích
 function removeAccents(str) {
   if (!str) return '';
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim();
-}
-
-function fallbackAIParser(text, existingItems) {
-  const rawWords = text.trim().split(/[\s,.]+/);
-  const results = [];
-
-  // Từ điển AI phong phú bao gồm các loại nông sản đặc thù (Lạc lè, Đậu bắp, Đậu đũa,...)
-  const DICTIONARY = [
-    { keys: ['lac le', 'quang le'], name: 'Lạc lè', cat: 'rau', unit: 'kg' },
-    { keys: ['dau bap', 'bap'], name: 'Đậu bắp', cat: 'rau', unit: 'kg' },
-    { keys: ['dau dua', 'do dua'], name: 'Đậu đũa', cat: 'rau', unit: 'kg' },
-    { keys: ['muop', 'muop huong'], name: 'Mướp hương', cat: 'rau', unit: 'kg' },
-    { keys: ['muong', 'muon', 'rau muong'], name: 'Rau muống', cat: 'rau', unit: 'mớ' },
-    { keys: ['toi', 'mong toi', 'mung toi', 'cung toi', 'cung toi ta', 'mung toi ta', 'rau mong toi', 'rau mung toi'], name: 'Rau mồng tơi', cat: 'rau', unit: 'mớ' },
-    { keys: ['su hao', 'suhao', 'hao'], name: 'Su hào', cat: 'rau', unit: 'củ' },
-    { keys: ['bap cai', 'cai', 'cai bap'], name: 'Bắp cải', cat: 'rau', unit: 'kg' },
-    { keys: ['do', 'do cove', 'do que', 'dau que'], name: 'Đỗ cove', cat: 'rau', unit: 'kg' },
-    { keys: ['gia', 'gia do'], name: 'Giá đỗ', cat: 'rau', unit: 'kg' },
-    { keys: ['ca chua', 'chua'], name: 'Cà chua', cat: 'rau', unit: 'kg' },
-    { keys: ['ca rot'], name: 'Cà rốt', cat: 'rau', unit: 'kg' },
-    { keys: ['bi do'], name: 'Bí đỏ', cat: 'rau', unit: 'kg' },
-    { keys: ['bi xanh'], name: 'Bí xanh', cat: 'rau', unit: 'kg' },
-    { keys: ['toi ta', 'cu toi'], name: 'Tỏi ta', cat: 'kho', unit: 'kg' },
-    { keys: ['hanh kho', 'cu hanh', 'hanh'], name: 'Hành khô', cat: 'kho', unit: 'kg' },
-    { keys: ['gung'], name: 'Gừng tươi', cat: 'kho', unit: 'kg' },
-    { keys: ['nam', 'nam huong'], name: 'Nấm hương khô', cat: 'kho', unit: 'kg' },
-    { keys: ['xoai', 'xoai cat'], name: 'Xoài cát', cat: 'qua', unit: 'kg' },
-    { keys: ['tao'], name: 'Táo Mỹ', cat: 'qua', unit: 'kg' },
-    { keys: ['cam'], name: 'Cam sành', cat: 'qua', unit: 'kg' },
-    { keys: ['chuoi'], name: 'Chuối tiêu', cat: 'qua', unit: 'nải' }
-  ];
-
-  // Bản đồ đổi số từ chữ tiếng Việt sang số (bảy -> 7, mười -> 10...)
-  const VN_NUMBERS = {
-    'mot': 1, 'hai': 2, 'ba': 3, 'bon': 4, 'nam': 5, 'sau': 6, 'bay': 7, 'tam': 8, 'chin': 9, 'muoi': 10,
-    'mop': 10, 'chuc': 10, 'tram': 100
-  };
-
-  for (let i = 0; i < rawWords.length; i++) {
-    const word = rawWords[i];
-    const cleanWord = removeAccents(word);
-    let num = parseInt(word, 10);
-
-    // Kiểm tra nếu số viết bằng chữ tiếng Việt (ví dụ "bay" -> 7, "mung toi 7")
-    if (isNaN(num) && VN_NUMBERS[cleanWord]) {
-      num = VN_NUMBERS[cleanWord];
-    }
-
-    if (!isNaN(num) && num > 0 && num < 2000) {
-      const phrase = currentTextBuf.join(' ').trim();
-      if (phrase) {
-        const normPhrase = removeAccents(phrase);
-        
-        // 1. Khớp từ điển chính xác nhất
-        const dictMatch = DICTIONARY.find(d => d.keys.some(k => k === normPhrase || normPhrase === k));
-
-        // 2. Khớp chính xác với thẻ đã có trong ứng dụng
-        const matchedItem = existingItems.find(ex => removeAccents(ex.name) === normPhrase);
-
-        let finalName = matchedItem ? matchedItem.name : (dictMatch ? dictMatch.name : capitalizeVietnamese(phrase));
-        let finalCat = matchedItem ? matchedItem.category : (dictMatch ? dictMatch.cat : 'rau');
-        let finalUnit = matchedItem ? matchedItem.unit : (dictMatch ? dictMatch.unit : 'kg');
-
-        results.push({
-          matchedItem: matchedItem || null,
-          matchedName: finalName,
-          newPrice: num,
-          category: finalCat,
-          unit: finalUnit
-        });
-      }
-      currentTextBuf = [];
-    } else {
-      currentTextBuf.push(word);
-    }
-  }
-
-  return results;
-}
-
-function capitalizeVietnamese(str) {
-  return str.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
